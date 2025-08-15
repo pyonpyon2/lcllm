@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import List
 from dataclasses import dataclass
+import glob
 
 from openai import OpenAI
 from langchain_chroma import Chroma  # ← 新パッケージ
@@ -47,7 +48,7 @@ class Config:
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
-    p.add_argument("files", nargs="*")
+    p.add_argument("files", nargs="*", help="ファイルパス（*.txtなどのワイルドカード対応）")
     p.add_argument("--query", default="これらのテキストの要点を日本語で箇条書きでまとめてください。")
     p.add_argument("--encoding", default="utf-8")
     p.add_argument("--persist_dir", default=None)
@@ -63,8 +64,17 @@ def parse_args() -> Config:
     p.add_argument("--fetch_k", type=int, default=50)
     p.add_argument("--mmr_lambda", type=float, default=0.3)
     args = p.parse_args()
+    
+    # ワイルドカードを展開してファイルリストを作成
+    expanded_files = []
+    for pattern in args.files:
+        if '*' in pattern or '?' in pattern:
+            expanded_files.extend(glob.glob(pattern))
+        else:
+            expanded_files.append(pattern)
+    
     return Config(
-        files=[Path(f) for f in args.files],
+        files=[Path(f) for f in expanded_files],
         query=args.query,
         encoding=args.encoding,
         persist_dir=args.persist_dir,
