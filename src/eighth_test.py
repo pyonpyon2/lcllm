@@ -11,6 +11,7 @@ from langchain_chroma import Chroma  # ← 新パッケージ
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.docstore.document import Document
 import argparse
+from FlagEmbedding import FlagReranker  # ★追加
 
 # =====================
 # ロギング設定
@@ -45,6 +46,10 @@ class Config:
     chat_model_id: str
     fetch_k: int
     mmr_lambda: float
+    candidate_k: int
+    reranker_model: str
+    rerank_batch_size: int
+    no_rerank: bool
 
 def parse_args() -> Config:
     p = argparse.ArgumentParser()
@@ -63,6 +68,13 @@ def parse_args() -> Config:
     p.add_argument("--chat_model_id", default="openai/gpt-oss-20b")
     p.add_argument("--fetch_k", type=int, default=50)
     p.add_argument("--mmr_lambda", type=float, default=0.3)
+
+    # 再ランク用追加引数
+    p.add_argument("--candidate_k", type=int, default=30, help="再ランク前の候補数")
+    p.add_argument("--reranker_model", default="BAAI/bge-reranker-v2-m3", help="再ランカーモデル名")
+    p.add_argument("--rerank_batch_size", type=int, default=16, help="再ランク時のバッチサイズ")
+    p.add_argument("--no_rerank", action="store_true", help="再ランクを無効化")
+
     args = p.parse_args()
     
     # ワイルドカードを展開してファイルリストを作成
@@ -89,6 +101,10 @@ def parse_args() -> Config:
         chat_model_id=args.chat_model_id,
         fetch_k=args.fetch_k,
         mmr_lambda=args.mmr_lambda,
+        candidate_k=args.candidate_k,
+        reranker_model=args.reranker_model,
+        rerank_batch_size=args.rerank_batch_size,
+        no_rerank=args.no_rerank
     )
 
 class LMStudioEmbedding:
@@ -124,6 +140,12 @@ class QAService:
         self.client = OpenAI(base_url=cfg.base_url, api_key=cfg.api_key)
         self.embedding_fn = LMStudioEmbedding(self.client, cfg.embedding_model_id)
         self.cfg = cfg
+        self.reranker = None
+        if not cfg.no_rerank:
+            try:
+                self.reranker = FlagReranker(cfg.reranker_model, use_fp16=False, device="cpu")
+            except Exception as e:
+                logger.warning(f"再ランカー初期化失敗: {e}")
 
     def build_vectordb(self, chunks: List[Document]) -> Chroma:
         start = time.perf_counter()
@@ -136,12 +158,28 @@ class QAService:
         logger.info(f"Built vectordb in {time.perf_counter() - start:.2f}s")
         return db
 
-    def retrieve_mmr(self, vectordb: Chroma, query: str) -> List[Document]:
+    def retrieve_with_rerank(self, vectordb: Chroma, query: str) -> List[Document]:
+        # 1) 広めに取得（MMR）
         retriever = vectordb.as_retriever(
             search_type="mmr",
-            search_kwargs={"k": self.cfg.top_k, "fetch_k": self.cfg.fetch_k, "lambda_mult": self.cfg.mmr_lambda},
+            search_kwargs={
+                "k": self.cfg.candidate_k,
+                "fetch_k": max(self.cfg.candidate_k, self.cfg.fetch_k),
+                "lambda_mult": self.cfg.mmr_lambda
+            },
         )
-        return retriever.invoke(query)  # ← 新API
+        candidates = retriever.invoke(query)
+
+        # 2) 再ランク
+        if not self.reranker:
+            return candidates[:self.cfg.top_k]
+
+        pairs = [(query, d.page_content) for d in candidates]
+        scores = self.reranker.compute_score(
+            pairs, normalize=True, batch_size=self.cfg.rerank_batch_size
+        )
+        ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+        return [d for d, _ in ranked[:self.cfg.top_k]]
 
     def build_user_prompt(self, query: str, ctx_docs: List[Document]) -> str:
         header = f"■ 質問:\n{query.strip()}\n\n■ 参考文書（抜粋）:\n"
@@ -157,7 +195,7 @@ class QAService:
 
     def answer(self, vectordb: Chroma, query: str) -> str:
         start = time.perf_counter()
-        ctx_docs = self.retrieve_mmr(vectordb, query)
+        ctx_docs = self.retrieve_with_rerank(vectordb, query)
         user_prompt = self.build_user_prompt(query, ctx_docs)
         resp = self.client.chat.completions.create(
             model=self.cfg.chat_model_id,
@@ -167,7 +205,8 @@ class QAService:
         )
         logger.info(f"Generated answer in {time.perf_counter() - start:.2f}s")
         content = resp.choices[0].message.content.strip()
-        refs = "参照: " + ", ".join(f"{d.metadata.get('source','?')}#chunk-{d.metadata.get('chunk_id','?')}" for d in ctx_docs)
+        refs = "参照: " + ", ".join(f"{d.metadata.get('source','?')}#chunk-{d.metadata.get('chunk_id','?')}"
+                                   for d in ctx_docs)
         return content + "\n\n" + refs
 
 def main():
