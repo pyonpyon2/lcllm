@@ -1,5 +1,0 @@
- python .\src\fifth_test.py .\doc\shizuku.txt .\doc\kizuato.txt .\doc\desire.txt .\doc\saimingakushuu.txt .\doc\ambivalenz.txt --query "要約して" --persist_dir ./.chroma-pc98
- python .\src\fifth_test.py --ask_only --persist_dir ./.chroma-pc98 --collection_name demo-lms-texts --query "柏木 千鶴について教えて？"
-
- python .\src\sixth_test.py .\doc\shizuku.txt .\doc\kizuato.txt .\doc\desire.txt .\doc\saimingakushuu.txt .\doc\ambivalenz.txt --query "要約して" --persist_dir ./.chroma-pc98 --top_k 6 --fetch_k 60 --mmr_lambda 0.3
- python .\src\sixth_test.py --ask_only --persist_dir ./.chroma-pc98 --collection_name demo-lms-texts  --top_k 6 --fetch_k 60 --mmr_lambda 0.3 --query "逆レイプといえば？"
